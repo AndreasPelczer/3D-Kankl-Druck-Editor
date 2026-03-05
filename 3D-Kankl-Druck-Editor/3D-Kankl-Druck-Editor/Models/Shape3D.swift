@@ -30,6 +30,144 @@ struct Triangle {
 struct MeshData {
     var triangles: [Triangle]
 
+    // MARK: - Bounding box
+
+    var boundingBox: (min: SIMD3<Float>, max: SIMD3<Float>) {
+        guard let first = triangles.first else {
+            return (min: .zero, max: .zero)
+        }
+        var lo = first.v0
+        var hi = first.v0
+        for tri in triangles {
+            for v in [tri.v0, tri.v1, tri.v2] {
+                lo = simd_min(lo, v)
+                hi = simd_max(hi, v)
+            }
+        }
+        return (min: lo, max: hi)
+    }
+
+    var center: SIMD3<Float> {
+        let bb = boundingBox
+        return (bb.min + bb.max) * 0.5
+    }
+
+    var sizeInMM: SIMD3<Float> {
+        let bb = boundingBox
+        return bb.max - bb.min
+    }
+
+    // MARK: - Normalization
+
+    /// Centers the mesh on the origin (0,0,0)
+    func centered() -> MeshData {
+        let c = center
+        return MeshData(triangles: triangles.map { tri in
+            Triangle(
+                v0: tri.v0 - c, v1: tri.v1 - c, v2: tri.v2 - c,
+                normal: tri.normal
+            )
+        })
+    }
+
+    /// Uniformly scales the mesh to fit within a bounding box of targetSize mm
+    func normalized(targetSize: Float = 50.0) -> MeshData {
+        let size = sizeInMM
+        let maxDim = max(size.x, size.y, size.z)
+        guard maxDim > 0 else { return self }
+        let scale = targetSize / maxDim
+        return scaled(by: scale)
+    }
+
+    /// Scales all vertices uniformly
+    func scaled(by factor: Float) -> MeshData {
+        MeshData(triangles: triangles.map { tri in
+            Triangle(
+                v0: tri.v0 * factor, v1: tri.v1 * factor, v2: tri.v2 * factor,
+                normal: tri.normal
+            )
+        })
+    }
+
+    // MARK: - Decimation (vertex clustering)
+
+    /// Reduces triangle count using voxel-grid vertex clustering.
+    /// Groups vertices into grid cells of `cellSize`, merges each group to centroid.
+    func decimated(targetCount: Int) -> MeshData {
+        guard triangles.count > targetCount else { return self }
+
+        let bb = boundingBox
+        let size = bb.max - bb.min
+        let maxDim = max(size.x, size.y, size.z)
+        guard maxDim > 0 else { return self }
+
+        // Compute cell size to achieve approximate target count
+        // More cells = more triangles preserved. Start with a ratio.
+        let ratio = Float(targetCount) / Float(triangles.count)
+        // Cube root because we're working in 3D
+        let cellSize = maxDim * pow(ratio, 1.0 / 3.0) * 0.5
+
+        guard cellSize > 0 else { return self }
+
+        let invCell = 1.0 / cellSize
+
+        // Map each vertex to its grid cell, accumulate positions
+        struct CellKey: Hashable {
+            let x, y, z: Int32
+        }
+
+        var cellCentroids: [CellKey: (sum: SIMD3<Float>, count: Int)] = [:]
+
+        func cellFor(_ v: SIMD3<Float>) -> CellKey {
+            CellKey(
+                x: Int32(floor((v.x - bb.min.x) * invCell)),
+                y: Int32(floor((v.y - bb.min.y) * invCell)),
+                z: Int32(floor((v.z - bb.min.z) * invCell))
+            )
+        }
+
+        // First pass: accumulate vertex positions per cell
+        for tri in triangles {
+            for v in [tri.v0, tri.v1, tri.v2] {
+                let key = cellFor(v)
+                let existing = cellCentroids[key, default: (sum: .zero, count: 0)]
+                cellCentroids[key] = (sum: existing.sum + v, count: existing.count + 1)
+            }
+        }
+
+        // Compute centroids
+        var centroids: [CellKey: SIMD3<Float>] = [:]
+        for (key, val) in cellCentroids {
+            centroids[key] = val.sum / Float(val.count)
+        }
+
+        // Second pass: remap triangles, skip degenerate
+        var newTriangles: [Triangle] = []
+        newTriangles.reserveCapacity(targetCount)
+
+        for tri in triangles {
+            let nv0 = centroids[cellFor(tri.v0)]!
+            let nv1 = centroids[cellFor(tri.v1)]!
+            let nv2 = centroids[cellFor(tri.v2)]!
+
+            // Skip degenerate triangles (all vertices collapsed to same cell)
+            let k0 = cellFor(tri.v0)
+            let k1 = cellFor(tri.v1)
+            let k2 = cellFor(tri.v2)
+            if k0 == k1 || k1 == k2 || k0 == k2 { continue }
+
+            let normal = MeshGenerator.faceNormal(nv0, nv1, nv2)
+            newTriangles.append(Triangle(v0: nv0, v1: nv1, v2: nv2, normal: normal))
+        }
+
+        // If we overshot, try again with larger cells
+        if newTriangles.count > targetCount * 2 {
+            return MeshData(triangles: newTriangles).decimated(targetCount: targetCount)
+        }
+
+        return MeshData(triangles: newTriangles)
+    }
+
     // Builds an SCNGeometry from the triangle array
     func toSCNGeometry() -> SCNGeometry {
         var vertices: [SCNVector3] = []
