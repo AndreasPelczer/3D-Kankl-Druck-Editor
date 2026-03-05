@@ -94,7 +94,7 @@ enum STLImporter {
 
         // Read triangle count from bytes 80-83
         let expectedCount: UInt32 = data.withUnsafeBytes { buf in
-            buf.load(fromByteOffset: 80, as: UInt32.self)
+            buf.loadUnaligned(fromByteOffset: 80, as: UInt32.self)
         }
 
         guard expectedCount > 0 else {
@@ -128,21 +128,21 @@ enum STLImporter {
             for i in 0..<count {
                 let offset = 84 + i * 50
 
-                let nx = buf.load(fromByteOffset: offset + 0,  as: Float.self)
-                let ny = buf.load(fromByteOffset: offset + 4,  as: Float.self)
-                let nz = buf.load(fromByteOffset: offset + 8,  as: Float.self)
+                let nx = buf.loadUnaligned(fromByteOffset: offset + 0,  as: Float.self)
+                let ny = buf.loadUnaligned(fromByteOffset: offset + 4,  as: Float.self)
+                let nz = buf.loadUnaligned(fromByteOffset: offset + 8,  as: Float.self)
 
-                let v0x = buf.load(fromByteOffset: offset + 12, as: Float.self)
-                let v0y = buf.load(fromByteOffset: offset + 16, as: Float.self)
-                let v0z = buf.load(fromByteOffset: offset + 20, as: Float.self)
+                let v0x = buf.loadUnaligned(fromByteOffset: offset + 12, as: Float.self)
+                let v0y = buf.loadUnaligned(fromByteOffset: offset + 16, as: Float.self)
+                let v0z = buf.loadUnaligned(fromByteOffset: offset + 20, as: Float.self)
 
-                let v1x = buf.load(fromByteOffset: offset + 24, as: Float.self)
-                let v1y = buf.load(fromByteOffset: offset + 28, as: Float.self)
-                let v1z = buf.load(fromByteOffset: offset + 32, as: Float.self)
+                let v1x = buf.loadUnaligned(fromByteOffset: offset + 24, as: Float.self)
+                let v1y = buf.loadUnaligned(fromByteOffset: offset + 28, as: Float.self)
+                let v1z = buf.loadUnaligned(fromByteOffset: offset + 32, as: Float.self)
 
-                let v2x = buf.load(fromByteOffset: offset + 36, as: Float.self)
-                let v2y = buf.load(fromByteOffset: offset + 40, as: Float.self)
-                let v2z = buf.load(fromByteOffset: offset + 44, as: Float.self)
+                let v2x = buf.loadUnaligned(fromByteOffset: offset + 36, as: Float.self)
+                let v2y = buf.loadUnaligned(fromByteOffset: offset + 40, as: Float.self)
+                let v2z = buf.loadUnaligned(fromByteOffset: offset + 44, as: Float.self)
 
                 var normal = SIMD3<Float>(nx, ny, nz)
                 let v0 = SIMD3<Float>(v0x, v0y, v0z)

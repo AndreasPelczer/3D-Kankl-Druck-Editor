@@ -38,7 +38,7 @@ struct ContentView: View {
                         VStack(spacing: 12) {
                             ProgressView()
                                 .scaleEffect(1.5)
-                            Text(viewModel.isRepairing ? "Reparatur läuft..." : "STL wird geladen...")
+                            Text(viewModel.isRepairing ? "Reparatur läuft..." : "Datei wird geladen...")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -146,8 +146,8 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $viewModel.showFilePicker) {
-                STLDocumentPicker { url in
-                    viewModel.importSTL(from: url)
+                MeshDocumentPicker { url in
+                    viewModel.importFile(from: url)
                 }
             }
             .sheet(isPresented: $viewModel.showRepairDetails) {
@@ -157,11 +157,12 @@ struct ContentView: View {
                 RepairLogSheet(log: viewModel.repairLog, analysis: viewModel.meshAnalysis)
             }
             .alert("Import-Fehler",
-                   isPresented: $viewModel.showImportError,
-                   presenting: viewModel.importError) { _ in
+                   isPresented: $viewModel.showImportError) {
                 Button("OK") {}
-            } message: { error in
-                Text(error.localizedDescription)
+            } message: {
+                if let error = viewModel.importError {
+                    Text(error.localizedDescription)
+                }
             }
             .alert("Komplexes Mesh",
                    isPresented: $viewModel.showComplexityWarning) {
@@ -192,8 +193,8 @@ struct ContentView: View {
                 Text("Das Mesh ist nicht druckbereit. Trotzdem exportieren?")
             }
             .onOpenURL { url in
-                guard url.pathExtension.lowercased() == "stl" else { return }
-                viewModel.importSTL(from: url)
+                guard FileImporter.isSupported(url: url) else { return }
+                viewModel.importFile(from: url)
             }
         }
     }
@@ -203,17 +204,20 @@ struct ContentView: View {
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
 
+        // Try file URL first (works for all formats)
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data = data as? Data,
-                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                      let url = URL(dataRepresentation: data, relativeTo: nil),
+                      FileImporter.isSupported(url: url) else { return }
                 Task { @MainActor in
-                    viewModel.importSTL(from: url)
+                    viewModel.importFile(from: url)
                 }
             }
             return true
         }
 
+        // Try raw data drop (STL)
         if provider.hasItemConformingToTypeIdentifier(UTType.stl.identifier) {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.stl.identifier) { data, _ in
                 guard let data else { return }
@@ -221,7 +225,7 @@ struct ContentView: View {
                     .appendingPathComponent("dropped_\(UUID().uuidString).stl")
                 try? data.write(to: tempURL)
                 Task { @MainActor in
-                    viewModel.importSTL(from: tempURL)
+                    viewModel.importFile(from: tempURL)
                 }
             }
             return true
@@ -407,13 +411,15 @@ private struct RepairLogSheet: View {
     }
 }
 
-// MARK: - Document Picker
+// MARK: - Document Picker (STL, OBJ, DXF)
 
-struct STLDocumentPicker: UIViewControllerRepresentable {
+struct MeshDocumentPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.stl, .data])
+        // Accept STL, OBJ, DXF and generic data as fallback
+        let types: [UTType] = [.stl, .obj, .dxf, .data]
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types)
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = false
         return picker
@@ -446,8 +452,10 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-// MARK: - UTType extension for STL
+// MARK: - UTType extensions for 3D file formats
 
 extension UTType {
     static let stl = UTType(filenameExtension: "stl") ?? .data
+    static let obj = UTType(filenameExtension: "obj") ?? .data
+    static let dxf = UTType(filenameExtension: "dxf") ?? .data
 }
