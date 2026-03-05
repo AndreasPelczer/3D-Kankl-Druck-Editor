@@ -14,6 +14,23 @@ import simd
 
 enum DisplacementEngine {
 
+    /// Target triangle count after subdivision. Balances detail vs. performance.
+    /// ~3000 triangles renders smoothly on any iOS device.
+    static let targetTriangleCount = 3000
+
+    /// Compute how many subdivision levels are needed to reach the target triangle count.
+    /// Each level multiplies triangles by 4.
+    static func adaptiveSubdivisionLevel(baseTriangleCount: Int, target: Int = targetTriangleCount) -> Int {
+        guard baseTriangleCount > 0 else { return 0 }
+        var count = baseTriangleCount
+        var level = 0
+        while count * 4 <= target {
+            count *= 4
+            level += 1
+        }
+        return level
+    }
+
     /// Apply a surface pattern to a mesh. Returns an unmodified copy for .smooth.
     static func apply(
         pattern: SurfacePattern,
@@ -21,13 +38,16 @@ enum DisplacementEngine {
         intensity: Float,
         scale: Float,
         parameters: [String: Float],
-        subdivisions: Int = 3
+        subdivisions: Int? = nil
     ) -> MeshData {
         guard pattern != .smooth else { return mesh }
 
+        // Use adaptive subdivision unless explicitly overridden
+        let levels = subdivisions ?? adaptiveSubdivisionLevel(baseTriangleCount: mesh.triangles.count)
+
         // Subdivide so there are enough vertices for visible displacement
         var subdividedMesh = mesh
-        for _ in 0..<subdivisions {
+        for _ in 0..<levels {
             subdividedMesh = subdivide(subdividedMesh)
         }
 

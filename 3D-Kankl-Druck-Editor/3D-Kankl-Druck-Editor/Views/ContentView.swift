@@ -15,8 +15,18 @@ struct ContentView: View {
             VStack(spacing: 0) {
 
                 // 3D preview (takes remaining space)
-                PreviewView(geometry: viewModel.sceneGeometry)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ZStack(alignment: .topTrailing) {
+                    PreviewView(geometry: viewModel.previewGeometry)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if viewModel.isComputing {
+                        ProgressView()
+                            .padding(8)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .padding(12)
+                    }
+                }
 
                 Divider()
 

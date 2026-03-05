@@ -3,61 +3,81 @@
 //  3D-Kankl-Druck-Editor
 //
 //  Central ViewModel: holds shape parameters, surface pattern state,
-//  generates mesh, and triggers export.
+//  generates mesh with debounced async computation, and triggers export.
 //
 
 import Foundation
 import SwiftUI
 import SceneKit
-import Combine
 
 @Observable
 final class ShapeViewModel {
 
     // MARK: - Shape selection
 
-    var selectedShape: ShapeType = .cube
+    var selectedShape: ShapeType = .cube {
+        didSet { schedulePreviewUpdate() }
+    }
 
     // MARK: - Cube parameters
 
-    var cubeWidth: Float = 20
-    var cubeHeight: Float = 20
-    var cubeDepth: Float = 20
+    var cubeWidth: Float = 20 { didSet { schedulePreviewUpdate() } }
+    var cubeHeight: Float = 20 { didSet { schedulePreviewUpdate() } }
+    var cubeDepth: Float = 20 { didSet { schedulePreviewUpdate() } }
 
     // MARK: - Cylinder parameters
 
-    var cylinderRadius: Float = 10
-    var cylinderHeight: Float = 30
-    var cylinderSegments: Int = 32
+    var cylinderRadius: Float = 10 { didSet { schedulePreviewUpdate() } }
+    var cylinderHeight: Float = 30 { didSet { schedulePreviewUpdate() } }
+    var cylinderSegments: Int = 32 { didSet { schedulePreviewUpdate() } }
 
     // MARK: - Sphere parameters
 
-    var sphereRadius: Float = 15
-    var sphereSegments: Int = 32
+    var sphereRadius: Float = 15 { didSet { schedulePreviewUpdate() } }
+    var sphereSegments: Int = 32 { didSet { schedulePreviewUpdate() } }
 
     // MARK: - Surface pattern
 
-    var selectedPattern: SurfacePattern = .smooth
-    var patternIntensity: Float = 0.5    // 0..1, mapped to mm in export
-    var patternScale: Float = 1.0        // multiplier for pattern frequency
+    var selectedPattern: SurfacePattern = .smooth { didSet { schedulePreviewUpdate() } }
+    var patternIntensity: Float = 0.5 { didSet { schedulePreviewUpdate() } }
+    var patternScale: Float = 1.0 { didSet { schedulePreviewUpdate() } }
 
     /// Dynamic per-pattern parameters, keyed by PatternParameter.id
-    var patternParams: [String: Float] = [:]
+    var patternParams: [String: Float] = [:] {
+        didSet { schedulePreviewUpdate() }
+    }
 
-    // MARK: - Subdivision level for displacement
+    // MARK: - Preview state
 
-    /// Higher = more triangles = finer detail, but slower.
-    /// Cube 12 tris → 3 subdivisions = 768 tris, 4 = 3072.
-    var subdivisionLevel: Int = 3
+    /// The geometry currently displayed in the 3D preview (updated async)
+    var previewGeometry: SCNGeometry = {
+        // Start with a default cube
+        let geo = MeshGenerator.cube(width: 20, height: 20, depth: 20).toSCNGeometry()
+        geo.firstMaterial?.diffuse.contents = UIColor.systemBlue
+        geo.firstMaterial?.isDoubleSided = true
+        return geo
+    }()
+
+    /// True while a displacement computation is running
+    var isComputing = false
 
     // MARK: - Export state
 
     var exportFileURL: URL?
     var showShareSheet = false
 
+    // MARK: - Debounce timer
+
+    private var debounceTask: Task<Void, Never>?
+
+    /// Debounce interval: short for smooth (instant), longer for displacement
+    private var debounceInterval: Duration {
+        selectedPattern == .smooth ? .milliseconds(16) : .milliseconds(200)
+    }
+
     // MARK: - Mesh generation
 
-    /// Base mesh before displacement (from shape generators)
+    /// Base mesh before displacement (from shape generators). Cheap to compute.
     var baseMesh: MeshData {
         switch selectedShape {
         case .cube:
@@ -69,30 +89,70 @@ final class ShapeViewModel {
         }
     }
 
-    /// Final mesh with displacement applied
+    /// Synchronous full mesh computation (used for export)
     var currentMesh: MeshData {
         let base = baseMesh
         guard selectedPattern != .smooth else { return base }
-
-        // Map intensity [0..1] to a reasonable mm displacement based on shape size
         let maxDimension = shapeMaxDimension
-        let displacementMM = patternIntensity * maxDimension * 0.08 // max ~8% of size
+        let displacementMM = patternIntensity * maxDimension * 0.08
 
         return DisplacementEngine.apply(
             pattern: selectedPattern,
             to: base,
             intensity: displacementMM,
             scale: patternScale,
-            parameters: resolvedPatternParams,
-            subdivisions: subdivisionLevel
+            parameters: resolvedPatternParams
         )
     }
 
-    var sceneGeometry: SCNGeometry {
-        let geo = currentMesh.toSCNGeometry()
-        geo.firstMaterial?.diffuse.contents = UIColor.systemBlue
-        geo.firstMaterial?.isDoubleSided = true
-        return geo
+    // MARK: - Debounced async preview
+
+    private func schedulePreviewUpdate() {
+        debounceTask?.cancel()
+        debounceTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            // Wait for debounce interval
+            try? await Task.sleep(for: self.debounceInterval)
+            guard !Task.isCancelled else { return }
+
+            // For smooth shapes, compute synchronously (fast path)
+            if self.selectedPattern == .smooth {
+                let geo = self.baseMesh.toSCNGeometry()
+                geo.firstMaterial?.diffuse.contents = UIColor.systemBlue
+                geo.firstMaterial?.isDoubleSided = true
+                self.previewGeometry = geo
+                return
+            }
+
+            // Capture values for background computation
+            let pattern = self.selectedPattern
+            let base = self.baseMesh
+            let intensity = self.patternIntensity * self.shapeMaxDimension * 0.08
+            let scale = self.patternScale
+            let params = self.resolvedPatternParams
+
+            self.isComputing = true
+
+            // Run displacement on background thread
+            let mesh = await Task.detached(priority: .userInitiated) {
+                DisplacementEngine.apply(
+                    pattern: pattern,
+                    to: base,
+                    intensity: intensity,
+                    scale: scale,
+                    parameters: params
+                )
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            let geo = mesh.toSCNGeometry()
+            geo.firstMaterial?.diffuse.contents = UIColor.systemBlue
+            geo.firstMaterial?.isDoubleSided = true
+            self.previewGeometry = geo
+            self.isComputing = false
+        }
     }
 
     // MARK: - Export
