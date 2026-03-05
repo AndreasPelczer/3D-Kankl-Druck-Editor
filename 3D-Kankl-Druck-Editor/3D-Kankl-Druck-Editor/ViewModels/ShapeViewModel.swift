@@ -48,6 +48,16 @@ final class ShapeViewModel {
     var pendingComplexMesh: (mesh: MeshData, url: URL)?
     var isImporting = false
 
+    // MARK: - Mesh analysis & repair
+
+    var meshAnalysis: MeshAnalysis?
+    var isAnalyzing = false
+    var isRepairing = false
+    var repairLog: [String] = []
+    var showRepairLog = false
+    var showRepairDetails = false
+    var showExportWarning = false
+
     // MARK: - Shape selection
 
     var selectedShape: ShapeType = .cube {
@@ -223,7 +233,12 @@ final class ShapeViewModel {
         patternScale = 1.0
         patternParams = [:]
         isImporting = false
+        meshAnalysis = nil
+        repairLog = []
         schedulePreviewUpdate()
+
+        // Auto-analyze imported mesh
+        analyzeMesh()
     }
 
     // MARK: - Reset
@@ -247,7 +262,76 @@ final class ShapeViewModel {
         patternIntensity = 0.5
         patternScale = 1.0
         patternParams = [:]
+        meshAnalysis = nil
+        repairLog = []
         schedulePreviewUpdate()
+    }
+
+    // MARK: - Mesh Analysis & Repair
+
+    /// Analyzes the current base mesh for problems (async, background thread)
+    func analyzeMesh() {
+        isAnalyzing = true
+        meshAnalysis = nil
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let mesh = self.baseMesh
+
+            let analysis = await Task.detached(priority: .userInitiated) {
+                MeshAnalyzer.analyze(mesh: mesh)
+            }.value
+
+            guard !Task.isCancelled else { return }
+            self.meshAnalysis = analysis
+            self.isAnalyzing = false
+        }
+    }
+
+    /// Repairs all issues found in analysis
+    func repairMesh() {
+        guard let analysis = meshAnalysis, !analysis.isPrintable else { return }
+        guard let imported = importedShape else { return }
+
+        isRepairing = true
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let mesh = imported.normalizedMesh
+
+            let result = await Task.detached(priority: .userInitiated) {
+                MeshRepairer.repair(mesh: mesh, analysis: analysis)
+            }.value
+
+            guard !Task.isCancelled else { return }
+
+            // Replace the imported shape with repaired mesh
+            let repairedImport = ImportedShape(
+                originalURL: imported.originalURL,
+                originalMesh: imported.originalMesh,
+                normalizedMesh: result.mesh,
+                displayName: imported.displayName,
+                originalTriangleCount: imported.originalTriangleCount,
+                originalSizeInMM: imported.originalSizeInMM
+            )
+            self.importedShape = repairedImport
+            self.repairLog = result.log
+            self.isRepairing = false
+            self.showRepairLog = true
+            self.schedulePreviewUpdate()
+
+            // Re-analyze after repair
+            self.analyzeMesh()
+        }
+    }
+
+    /// Try export, but warn if mesh has issues
+    func tryExportSTL() {
+        if let analysis = meshAnalysis, !analysis.isPrintable {
+            showExportWarning = true
+        } else {
+            exportSTL()
+        }
     }
 
     /// True if the imported mesh has been modified from its original state

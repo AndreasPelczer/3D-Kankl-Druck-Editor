@@ -4,6 +4,7 @@
 //
 //  Main view: 3D preview on top, parameter sliders below, export button.
 //  Supports STL import via file picker, drag & drop, and onOpenURL.
+//  Includes mesh analysis + repair UI.
 //
 
 import SwiftUI
@@ -32,12 +33,12 @@ struct ContentView: View {
                             .allowsHitTesting(false)
                     }
 
-                    // Import loading overlay
-                    if viewModel.isImporting {
+                    // Import loading / analyzing / repairing overlay
+                    if viewModel.isImporting || viewModel.isRepairing {
                         VStack(spacing: 12) {
                             ProgressView()
                                 .scaleEffect(1.5)
-                            Text("STL wird geladen...")
+                            Text(viewModel.isRepairing ? "Reparatur läuft..." : "STL wird geladen...")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -47,7 +48,7 @@ struct ContentView: View {
                     }
 
                     // Computing indicator (top right)
-                    if viewModel.isComputing && !viewModel.isImporting {
+                    if viewModel.isComputing && !viewModel.isImporting && !viewModel.isRepairing {
                         VStack {
                             HStack {
                                 Spacer()
@@ -61,12 +62,17 @@ struct ContentView: View {
                         }
                     }
 
-                    // Mesh info overlay (top left) for imported meshes
+                    // Mesh info + analysis badge (top left) for imported meshes
                     if let imported = viewModel.importedShape {
                         VStack {
                             HStack {
-                                MeshInfoBadge(imported: imported, scaleFactor: viewModel.importScaleFactor)
-                                    .padding(12)
+                                MeshInfoBadge(
+                                    imported: imported,
+                                    scaleFactor: viewModel.importScaleFactor,
+                                    analysis: viewModel.meshAnalysis,
+                                    isAnalyzing: viewModel.isAnalyzing
+                                )
+                                .padding(12)
                                 Spacer()
                             }
                             Spacer()
@@ -75,6 +81,15 @@ struct ContentView: View {
                 }
                 .onDrop(of: [.stl, .data, .fileURL], isTargeted: $isDragOver) { providers in
                     handleDrop(providers: providers)
+                }
+
+                // MARK: - Repair banner (below preview, above sliders)
+                if let analysis = viewModel.meshAnalysis, !analysis.isPrintable, viewModel.hasImportedMesh {
+                    RepairBanner(
+                        analysis: analysis,
+                        onRepair: { viewModel.repairMesh() },
+                        onDetails: { viewModel.showRepairDetails = true }
+                    )
                 }
 
                 Divider()
@@ -101,7 +116,7 @@ struct ContentView: View {
 
                     // Export button
                     Button {
-                        viewModel.exportSTL()
+                        viewModel.tryExportSTL()
                     } label: {
                         Label("STL exportieren", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity)
@@ -135,6 +150,12 @@ struct ContentView: View {
                     viewModel.importSTL(from: url)
                 }
             }
+            .sheet(isPresented: $viewModel.showRepairDetails) {
+                RepairDetailsSheet(analysis: viewModel.meshAnalysis)
+            }
+            .sheet(isPresented: $viewModel.showRepairLog) {
+                RepairLogSheet(log: viewModel.repairLog, analysis: viewModel.meshAnalysis)
+            }
             .alert("Import-Fehler",
                    isPresented: $viewModel.showImportError,
                    presenting: viewModel.importError) { _ in
@@ -158,6 +179,18 @@ struct ContentView: View {
                     Text("Dieses Mesh hat \(pending.mesh.triangles.count) Dreiecke. Displacement kann langsam sein.")
                 }
             }
+            .alert("Mesh hat Probleme",
+                   isPresented: $viewModel.showExportWarning) {
+                Button("Erst reparieren") {
+                    viewModel.repairMesh()
+                }
+                Button("Trotzdem exportieren") {
+                    viewModel.exportSTL()
+                }
+                Button("Abbrechen", role: .cancel) {}
+            } message: {
+                Text("Das Mesh ist nicht druckbereit. Trotzdem exportieren?")
+            }
             .onOpenURL { url in
                 guard url.pathExtension.lowercased() == "stl" else { return }
                 viewModel.importSTL(from: url)
@@ -170,7 +203,6 @@ struct ContentView: View {
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
 
-        // Try file URL first
         if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data = data as? Data,
@@ -182,7 +214,6 @@ struct ContentView: View {
             return true
         }
 
-        // Try STL data directly
         if provider.hasItemConformingToTypeIdentifier(UTType.stl.identifier) {
             provider.loadDataRepresentation(forTypeIdentifier: UTType.stl.identifier) { data, _ in
                 guard let data else { return }
@@ -200,25 +231,179 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Mesh info badge
+// MARK: - Mesh info badge with analysis status
 
 private struct MeshInfoBadge: View {
     let imported: ImportedShape
     let scaleFactor: Float
+    let analysis: MeshAnalysis?
+    let isAnalyzing: Bool
 
     var body: some View {
         let size = imported.originalSizeInMM * scaleFactor
         VStack(alignment: .leading, spacing: 2) {
-            Text(imported.displayName)
-                .font(.caption.bold())
+            HStack(spacing: 6) {
+                Text(imported.displayName)
+                    .font(.caption.bold())
+
+                if isAnalyzing {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                } else if let analysis {
+                    Text(analysis.isPrintable ? "Druckbereit" : "\(analysis.issues.count) Probleme")
+                        .font(.caption2.bold())
+                        .foregroundStyle(analysis.isPrintable ? .green : .orange)
+                }
+            }
             Text("\(imported.originalTriangleCount) Dreiecke")
                 .font(.caption2)
-            Text("\(Int(size.x)) × \(Int(size.y)) × \(Int(size.z)) mm")
+            Text("\(Int(size.x)) \u{00D7} \(Int(size.y)) \u{00D7} \(Int(size.z)) mm")
                 .font(.caption2)
         }
         .padding(8)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Repair banner
+
+private struct RepairBanner: View {
+    let analysis: MeshAnalysis
+    let onRepair: () -> Void
+    let onDetails: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(analysis.issues.count) Probleme gefunden")
+                    .font(.caption.bold())
+                Text("Mesh ist nicht druckbereit")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button("Details", action: onDetails)
+                .font(.caption)
+                .buttonStyle(.bordered)
+
+            Button("Reparieren", action: onRepair)
+                .font(.caption.bold())
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.1))
+    }
+}
+
+// MARK: - Repair details sheet
+
+private struct RepairDetailsSheet: View {
+    let analysis: MeshAnalysis?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let analysis {
+                    Section("Zusammenfassung") {
+                        LabeledContent("Wasserdicht", value: analysis.isWatertight ? "Ja" : "Nein")
+                        LabeledContent("Komponenten", value: "\(analysis.componentCount)")
+                        LabeledContent("Status", value: analysis.isPrintable ? "Druckbereit" : "Probleme vorhanden")
+                    }
+
+                    if !analysis.issues.isEmpty {
+                        Section("Gefundene Probleme") {
+                            ForEach(analysis.issues) { issue in
+                                HStack(spacing: 10) {
+                                    Image(systemName: issueIcon(issue.type))
+                                        .foregroundStyle(issueColor(issue.type))
+                                    Text(issue.description)
+                                        .font(.subheadline)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Mesh-Analyse")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func issueIcon(_ type: MeshIssue.IssueType) -> String {
+        switch type {
+        case .openEdge: return "circle.dotted"
+        case .nonManifoldEdge: return "exclamationmark.triangle"
+        case .flippedNormal: return "arrow.uturn.backward"
+        case .floatingComponent: return "cube.transparent"
+        case .degenerateTriangle: return "triangle"
+        }
+    }
+
+    private func issueColor(_ type: MeshIssue.IssueType) -> Color {
+        switch type {
+        case .openEdge, .nonManifoldEdge: return .red
+        case .flippedNormal: return .orange
+        case .floatingComponent: return .yellow
+        case .degenerateTriangle: return .gray
+        }
+    }
+}
+
+// MARK: - Repair log sheet
+
+private struct RepairLogSheet: View {
+    let log: [String]
+    let analysis: MeshAnalysis?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(log, id: \.self) { entry in
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text(entry)
+                                .font(.subheadline)
+                        }
+                    }
+                } header: {
+                    Text("Reparatur abgeschlossen")
+                }
+
+                if let analysis {
+                    Section("Neuer Status") {
+                        HStack(spacing: 8) {
+                            Image(systemName: analysis.isPrintable ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(analysis.isPrintable ? .green : .orange)
+                            Text(analysis.isPrintable ? "Druckbereit" : "Noch Probleme vorhanden")
+                                .font(.subheadline.bold())
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Reparatur-Log")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fertig") { dismiss() }
+                }
+            }
+        }
     }
 }
 
