@@ -42,7 +42,7 @@ final class ShapeViewModel {
 
     // MARK: - Import state
 
-    var importError: STLImportError?
+    var importError: FileImportError?
     var showImportError = false
     var showComplexityWarning = false
     var pendingComplexMesh: (mesh: MeshData, url: URL)?
@@ -151,10 +151,10 @@ final class ShapeViewModel {
         )
     }
 
-    // MARK: - STL Import
+    // MARK: - File Import (STL, OBJ, DXF)
 
-    /// Import an STL file from a URL. Handles security scoping, parsing, normalization.
-    func importSTL(from url: URL) {
+    /// Import a 3D file from a URL. Supports STL, OBJ, DXF.
+    func importFile(from url: URL) {
         isImporting = true
 
         Task { @MainActor [weak self] in
@@ -162,7 +162,7 @@ final class ShapeViewModel {
 
             do {
                 let rawMesh = try await Task.detached(priority: .userInitiated) {
-                    try STLImporter.load(from: url)
+                    try FileImporter.load(from: url)
                 }.value
 
                 // Check complexity
@@ -174,7 +174,7 @@ final class ShapeViewModel {
                 }
 
                 self.finalizeImport(rawMesh: rawMesh, url: url)
-            } catch let error as STLImportError {
+            } catch let error as FileImportError {
                 self.importError = error
                 self.showImportError = true
                 self.isImporting = false
