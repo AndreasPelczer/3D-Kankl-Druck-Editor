@@ -24,7 +24,7 @@ struct ContentView: View {
                 ScrollView {
                     ParameterPanel(viewModel: viewModel)
                 }
-                .frame(maxHeight: 260)
+                .frame(maxHeight: 360)
 
                 // Export button
                 Button {
